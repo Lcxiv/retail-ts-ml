@@ -1,5 +1,4 @@
-"""
-Feature Engineering Pipeline.
+"""Feature Engineering Pipeline.
 
 All features are computed in a time-aware manner — no future leakage.
 Adjust lag sizes and rolling windows based on the confirmed grain.
@@ -12,7 +11,8 @@ import pandas as pd
 import numpy as np
 
 from src.config.config import (
-    DATE_COLUMN, RETAILER_COLUMN, OBJECT_COLUMN, PRIMARY_TARGET, DEFAULT_GRAIN
+    DATE_COLUMN, RETAILER_COLUMN, STORE_COLUMN, PRODUCT_COLUMN,
+    PRIMARY_TARGET, DEFAULT_GRAIN,
 )
 
 log = logging.getLogger(__name__)
@@ -33,8 +33,8 @@ def add_lag_features(
     group_cols: list[str] | None = None,
 ) -> pd.DataFrame:
     """
-    Add lag features within each (retailer, object) group.
-    
+    Add lag features within each (retailer, store, product) group.
+
     Parameters
     ----------
     df : DataFrame sorted by [entity_cols, date_col]
@@ -45,7 +45,7 @@ def add_lag_features(
     if lags is None:
         lags = WEEKLY_LAGS if DEFAULT_GRAIN == "weekly" else MONTHLY_LAGS
     if group_cols is None:
-        group_cols = [RETAILER_COLUMN, OBJECT_COLUMN]
+        group_cols = [RETAILER_COLUMN, STORE_COLUMN, PRODUCT_COLUMN]
 
     df = df.sort_values(group_cols + [DATE_COLUMN]).copy()
     grp = df.groupby(group_cols, sort=False)[target]
@@ -71,7 +71,7 @@ def add_rolling_features(
     if windows is None:
         windows = [4, 8, 12]
     if group_cols is None:
-        group_cols = [RETAILER_COLUMN, OBJECT_COLUMN]
+        group_cols = [RETAILER_COLUMN, STORE_COLUMN, PRODUCT_COLUMN]
 
     df = df.sort_values(group_cols + [DATE_COLUMN]).copy()
 
@@ -121,19 +121,19 @@ def add_comparative_features(
     target: str = PRIMARY_TARGET,
 ) -> pd.DataFrame:
     """
-    Add retailer share, object share, z-score, and normalized index.
+    Add retailer share, store share, z-score, and normalized index.
     These are safe to compute per-period (no future leakage).
     """
     df = df.copy()
 
-    # Retailer share: object's share of retailer total in that period
+    # Retailer share: store's share of retailer total in that period
     period_retailer_total = df.groupby([DATE_COLUMN, RETAILER_COLUMN])[target].transform("sum")
-    df["object_share_of_retailer"] = df[target] / (period_retailer_total + 1e-6)
+    df["store_share_of_retailer"] = df[target] / (period_retailer_total + 1e-6)
 
-    # Object's z-score vs its own historical mean/std
-    obj_mean = df.groupby(OBJECT_COLUMN)[target].transform("mean")
-    obj_std = df.groupby(OBJECT_COLUMN)[target].transform("std").fillna(1)
-    df["object_zscore"] = (df[target] - obj_mean) / (obj_std + 1e-6)
+    # Store's z-score vs its own historical mean/std
+    store_mean = df.groupby(STORE_COLUMN)[target].transform("mean")
+    store_std = df.groupby(STORE_COLUMN)[target].transform("std").fillna(1)
+    df["store_zscore"] = (df[target] - store_mean) / (store_std + 1e-6)
 
     log.info("Added comparative features")
     return df
@@ -149,11 +149,11 @@ def add_hierarchical_features(
     hierarchy_cols: list[str] | None = None,
 ) -> pd.DataFrame:
     """
-    Add category-level and brand-level average trends.
+    Add category-level and department-level average trends.
     These aggregate from lag-shifted values to avoid leakage.
     """
     if hierarchy_cols is None:
-        hierarchy_cols = ["category", "brand"]
+        hierarchy_cols = ["category", "department"]
 
     df = df.copy()
     lag_col = "lag_1" if "lag_1" in df.columns else target

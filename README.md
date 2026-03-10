@@ -2,6 +2,10 @@
 
 An end-to-end **time series machine learning pipeline** for analyzing and forecasting retail sales trends across multiple retailers and selling objects.
 
+## 📚 ML Pipeline Guide
+
+**→ [Complete Step-by-Step Guide](docs/ml_pipeline_guide.md)** — 10-step reproducible walkthrough with code snippets and reasoning.
+
 ## Purpose
 
 This project models retail sales behavior over time, compares trend dynamics across retailers, identifies seasonality and anomalies, and generates accurate forecasts at multiple aggregation levels.
@@ -26,6 +30,10 @@ retail-ts-ml/
 │   ├── processed/        # Cleaned & transformed data
 │   └── external/         # Holiday calendars, economic signals, etc.
 │
+├── docs/
+│   ├── ml_pipeline_guide.md    # ⭐ Step-by-step ML guide with reasoning
+│   └── databases_schema_reference.md
+│
 ├── notebooks/
 │   ├── 01_schema_design.ipynb
 │   ├── 02_mock_data_generation.ipynb
@@ -37,20 +45,19 @@ retail-ts-ml/
 │
 ├── src/
 │   ├── config/           # Schema config, grain, targets
-│   ├── data/             # Mock generator, schema definitions
+│   ├── data/             # Mock generator, schema, validation
 │   ├── features/         # Feature engineering pipeline
 │   ├── models/           # Baseline and ML models
 │   ├── evaluation/       # Metrics and backtesting
 │   ├── visualization/    # Plotly charts
 │   └── utils/            # Helper utilities
 │
-├── outputs/
-│   ├── plots/
-│   ├── forecasts/
-│   ├── diagnostics/
-│   └── reports/
-│
 ├── tests/
+│   ├── test_schema.py
+│   ├── test_feature_engineering.py
+│   └── test_validation.py
+│
+├── outputs/
 ├── requirements.txt
 ├── README.md
 └── AGENTS.md
@@ -73,38 +80,45 @@ pip install -r requirements.txt
 # 4. Generate synthetic data
 python -m src.data.mock_generator
 
-# 5. Launch Jupyter
+# 5. Run data validation
+python -c "from src.data.validation import generate_validation_report, print_validation_report; import pandas as pd; df = pd.read_parquet('data/synthetic/synthetic_dg.parquet'); from src.data.schema import DG_SCHEMA, harmonize_to_unified; report = generate_validation_report(harmonize_to_unified(df, DG_SCHEMA)); print_validation_report(report)"
+
+# 6. Run tests
+python -m pytest tests/ -v
+
+# 7. Launch Jupyter
 jupyter lab
 ```
 
 ## Execution Phases
 
-| Phase | Name | Description |
-|-------|------|-------------|
-| 0 | Planning | Gather schema, confirm grain & targets |
-| 1 | Synthetic Data | Generate realistic mock retail sales data |
-| 2 | EDA | Decompose series, profile retailers & objects |
-| 3 | Feature Engineering | Lags, rolling stats, hierarchy, events |
-| 4 | Baseline Modeling | Naive, seasonal naive, moving average, ETS |
-| 5 | Advanced Modeling | ARIMA, Prophet, XGBoost, LightGBM |
-| 6 | Evaluation | Rolling backtest, segment-level metrics |
-| 7 | Packaging | Document assumptions, real-data transition |
+| Phase | Name | Description | Guide Step |
+|-------|------|-------------|------------|
+| 0 | Planning | Gather schema, confirm grain & targets | — |
+| 1 | Synthetic Data | Generate realistic mock retail sales data | [Step 1](docs/ml_pipeline_guide.md#step-1-data-ingestion--harmonization) |
+| 2 | EDA | Decompose series, profile retailers & objects | [Step 2](docs/ml_pipeline_guide.md#step-2-exploratory-data-analysis) |
+| 3 | Validation | Test distributions, check stationarity | [Step 3](docs/ml_pipeline_guide.md#step-3-data-validation--distribution-assessment) |
+| 4 | Feature Engineering | Lags, rolling stats, hierarchy, events | [Step 4](docs/ml_pipeline_guide.md#step-4-feature-engineering) |
+| 5 | Baseline Modeling | Naive, seasonal naive, moving average, ETS | [Step 6](docs/ml_pipeline_guide.md#step-6-baseline-models) |
+| 6 | Advanced Modeling | ARIMA, Prophet, XGBoost, LightGBM, LSTM | [Step 7](docs/ml_pipeline_guide.md#step-7-advanced-model-selection--reasoning) |
+| 7 | Evaluation | Rolling backtest, segment-level metrics | [Step 9](docs/ml_pipeline_guide.md#step-9-backtesting--evaluation) |
 
 ## Tech Stack
 
-- **Core**: Python, pandas, numpy
-- **Visualization**: matplotlib, plotly
+- **Core**: Python, pandas, numpy, scipy
+- **Visualization**: plotly, matplotlib
 - **ML**: scikit-learn, xgboost, lightgbm
-- **Time Series**: statsmodels, prophet
+- **Time Series**: statsmodels, prophet (optional)
+- **Deep Learning**: tensorflow (optional)
 - **Storage**: pyarrow / parquet
+- **Tuning**: optuna (optional)
 - **Notebooks**: Jupyter
-- **Optional**: mlflow, optuna, streamlit
 
 ## Status
 
-> **Current Phase**: Pre-schema planning (Phase 0)
+> **Current Phase**: Phase 4 — Pipeline validated, ML guide complete
 >
-> Awaiting final column list from user to finalize schema, grain, and target variable.
+> All source modules fixed and tested. See [ML Pipeline Guide](docs/ml_pipeline_guide.md) for the complete step-by-step walkthrough.
 
 ## Contributing
 
