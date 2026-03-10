@@ -1,8 +1,12 @@
 """
 Synthetic Retail Sales Data Generator.
 
-Generates realistic mock time series data for 4 retailers and 6 selling objects.
-All assumptions are documented inline. Replace with real data once schema is confirmed.
+Generates realistic mock data for 3 databases:
+  - DG:  daily store × product (UPC/SKU), departments, classes, geography
+  - S&F: transaction-level with integer dates
+  - WG:  daily store × category (aggregated)
+
+All column names match the actual database schemas.
 
 Usage:
     python -m src.data.mock_generator
@@ -19,18 +23,12 @@ import pandas as pd
 
 from src.config.config import (
     RETAILER_PROFILES,
-    OBJECT_PROFILES,
     SYNTH_START_DATE,
     SYNTH_END_DATE,
-    FREQUENCY_ALIAS,
     DATA_SYNTHETIC_DIR,
-    PRIMARY_TARGET,
-    DATE_COLUMN,
-    RETAILER_COLUMN,
-    OBJECT_COLUMN,
-    CATEGORY_COLUMN,
-    BRAND_COLUMN,
-    REGION_COLUMN,
+    DG_DEPARTMENTS,
+    DG_LOCATIONS,
+    WG_CATEGORIES,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -42,175 +40,277 @@ random.seed(NP_SEED)
 
 
 # ---------------------------------------------------------------------------
-# Helper functions
+# Shared helper functions
 # ---------------------------------------------------------------------------
 
-def _make_time_index() -> pd.DatetimeIndex:
-    """Build weekly date range for the synthetic period."""
-    return pd.date_range(start=SYNTH_START_DATE, end=SYNTH_END_DATE, freq=FREQUENCY_ALIAS)
+def _daily_dates() -> pd.DatetimeIndex:
+    """Daily date range for the synthetic period."""
+    return pd.date_range(start=SYNTH_START_DATE, end=SYNTH_END_DATE, freq="D")
 
 
-def _trend_component(n: int, slope: float) -> np.ndarray:
-    """Linear trend growing at `slope` units per week."""
+def _trend(n: int, slope: float) -> np.ndarray:
     return slope * np.arange(n)
 
 
-def _seasonality_component(
-    dates: pd.DatetimeIndex, strength: float, peak_season: str | None = None
-) -> np.ndarray:
-    """
-    Seasonality signal:
-    - Default: double peak (holiday Q4 + mid-year bump)
-    - summer peak_season: shifts main peak to weeks 24-35
-    """
-    week = dates.isocalendar().week.to_numpy(dtype=float)
-    if peak_season == "summer":
-        # Summer peak around week 28
-        signal = strength * 60 * np.exp(-0.5 * ((week - 28) / 6) ** 2)
-    else:
-        # Holiday peak (week 48) + mild summer bump (week 26)
-        signal = (
-            strength * 80 * np.exp(-0.5 * ((week - 48) / 5) ** 2)
-            + strength * 30 * np.exp(-0.5 * ((week - 26) / 6) ** 2)
-        )
-    return signal
+def _seasonality(dates: pd.DatetimeIndex, strength: float, peak: str | None = None) -> np.ndarray:
+    doy = dates.dayofyear.to_numpy(dtype=float)
+    if peak == "summer":
+        return strength * 60 * np.exp(-0.5 * ((doy - 196) / 40) ** 2)
+    # holiday peak (day ~340) + mild summer bump (day ~175)
+    return (
+        strength * 80 * np.exp(-0.5 * ((doy - 340) / 30) ** 2)
+        + strength * 30 * np.exp(-0.5 * ((doy - 175) / 40) ** 2)
+    )
 
 
-def _noise_component(n: int, level: str, base: float) -> np.ndarray:
-    """Add multiplicative noise scaled to base demand."""
+def _noise(n: int, level: str, base: float) -> np.ndarray:
     scale_map = {"low": 0.03, "medium": 0.08, "high": 0.18}
-    sigma = scale_map.get(level, 0.08) * base
-    return rng.normal(0, sigma, n)
+    return rng.normal(0, scale_map.get(level, 0.08) * base, n)
 
 
 def _promo_spikes(n: int, freq: str, base: float) -> np.ndarray:
-    """Inject random promotional spikes."""
     spikes = np.zeros(n)
-    rate_map = {"high": 0.12, "medium": 0.06, "low": 0.02}
-    rate = rate_map.get(freq, 0.04)
-    spike_idx = rng.choice(n, size=int(n * rate), replace=False)
-    spikes[spike_idx] = rng.uniform(0.5 * base, 1.5 * base, len(spike_idx))
+    rate = {"high": 0.12, "medium": 0.06, "low": 0.02}.get(freq, 0.04)
+    idx = rng.choice(n, size=int(n * rate), replace=False)
+    spikes[idx] = rng.uniform(0.5 * base, 1.5 * base, len(idx))
     return spikes
 
 
 def _anomalies(n: int, base: float) -> np.ndarray:
-    """Inject rare positive/negative anomalies."""
-    anomaly = np.zeros(n)
-    n_events = max(1, int(n * 0.015))
-    idx = rng.choice(n, size=n_events, replace=False)
-    magnitudes = rng.choice([-1, 1], size=n_events) * rng.uniform(0.4 * base, 0.9 * base, n_events)
-    anomaly[idx] = magnitudes
-    return anomaly
+    a = np.zeros(n)
+    k = max(1, int(n * 0.01))
+    idx = rng.choice(n, size=k, replace=False)
+    a[idx] = rng.choice([-1, 1], k) * rng.uniform(0.4 * base, 0.9 * base, k)
+    return a
 
 
-def _inject_missingness(df: pd.DataFrame, target_col: str) -> pd.DataFrame:
-    """
-    Simulate realistic missingness:
-    - ~2% random missing dates
-    - cold-start effect: first 8 weeks of some objects have NaN
-    """
-    df = df.copy()
-    n = len(df)
-    # Random missing
-    missing_idx = rng.choice(n, size=int(n * 0.02), replace=False)
-    df.loc[df.index[missing_idx], target_col] = np.nan
-    return df
+def _inject_missing(arr: np.ndarray, frac: float = 0.02) -> np.ndarray:
+    arr = arr.copy()
+    idx = rng.choice(len(arr), size=int(len(arr) * frac), replace=False)
+    arr[idx] = np.nan
+    return arr
 
 
-def _generate_series(
-    dates: pd.DatetimeIndex,
-    retailer: str,
-    obj_id: str,
-    obj_profile: dict,
-    ret_profile: dict,
-) -> pd.DataFrame:
-    """Generate a single (retailer, object) time series."""
-    n = len(dates)
-    base = obj_profile["base_units"] * (ret_profile["base_units"] / 400)
+# ---------------------------------------------------------------------------
+# DG: store × product × day
+# ---------------------------------------------------------------------------
 
-    trend = _trend_component(n, ret_profile["trend_slope"])
-    season = _seasonality_component(
-        dates,
-        ret_profile["seasonality_strength"],
-        ret_profile.get("peak_season"),
-    )
-    noise = _noise_component(n, ret_profile["noise_level"], base)
-    promo = _promo_spikes(n, ret_profile.get("promo_frequency", "low"), base)
-    anomaly = _anomalies(n, base)
+def generate_dg() -> pd.DataFrame:
+    """Generate synthetic DG data with actual column names."""
+    profile = RETAILER_PROFILES["DG"]
+    dates = _daily_dates()
+    n_dates = len(dates)
+    n_stores = profile["n_stores"]
+    n_products = profile["n_products"]
 
-    units = np.maximum(0, base + trend + season + noise + promo + anomaly)
+    log.info("Generating DG: %d days × %d stores × %d products", n_dates, n_stores, n_products)
 
-    # Derived financials (assumptions documented)
-    price = rng.uniform(10, 50, n)  # placeholder price
-    margin_pct = rng.uniform(0.15, 0.40, n)  # 15-40% margin assumption
-    revenue = units * price
-    margin = revenue * margin_pct
+    # Build product catalog
+    products = []
+    for dept_nbr, dept_info in DG_DEPARTMENTS.items():
+        for class_nbr, class_desc in dept_info["classes"]:
+            for i in range(max(1, n_products // len(DG_DEPARTMENTS) // len(dept_info["classes"]))):
+                pid = len(products)
+                products.append({
+                    "UPC": f"0{4900000000 + pid:010d}",
+                    "SKU": f"SKU-{pid:05d}",
+                    "P_SKU": f"PSKU-{pid:05d}",
+                    "DESCRIPTION": f"{class_desc} Item {i+1}",
+                    "CLASS_NBR": class_nbr,
+                    "CLASS_DESC": class_desc,
+                    "DEPARTMENT_NBR": dept_nbr,
+                    "DEPARTMENT_DESC": dept_info["desc"],
+                })
 
-    promo_flag = (promo > 0).astype(int)
-    holiday_flag = (dates.month == 12).astype(int)  # simple Dec holiday flag
+    # Assign stores to locations
+    stores = []
+    for s in range(1, n_stores + 1):
+        city, state = DG_LOCATIONS[s % len(DG_LOCATIONS)]
+        stores.append({"STORE": s, "CITY": city, "STATE": state})
 
-    df = pd.DataFrame(
-        {
-            DATE_COLUMN: dates,
-            RETAILER_COLUMN: retailer,
-            OBJECT_COLUMN: obj_id,
-            CATEGORY_COLUMN: obj_profile["category"],
-            BRAND_COLUMN: obj_profile["brand"],
-            REGION_COLUMN: obj_profile["region"],
-            PRIMARY_TARGET: units,
-            "revenue": revenue,
-            "margin": margin,
-            "price": price,
-            "promo_flag": promo_flag,
-            "holiday_flag": holiday_flag,
-        }
-    )
-    df = _inject_missingness(df, PRIMARY_TARGET)
+    # Sample a subset (not all stores carry all products every day)
+    sample_size = min(200_000, n_dates * n_stores * len(products))  # cap for speed
+    rows = []
+    base = profile["base_units"]
+
+    for product in products:
+        for store in random.sample(stores, min(10, len(stores))):
+            trend = _trend(n_dates, profile["trend_slope"])
+            season = _seasonality(dates, profile["seasonality_strength"])
+            noise = _noise(n_dates, profile["noise_level"], base)
+            promo = _promo_spikes(n_dates, "low", base)
+            qty = np.maximum(0, base + trend + season + noise + promo + _anomalies(n_dates, base))
+            qty = _inject_missing(qty)
+            net_sales = qty * rng.uniform(1.0, 15.0, n_dates)
+            trans_ct = np.maximum(1, (qty * rng.uniform(0.3, 0.8, n_dates)).astype(int))
+
+            for day_idx in range(n_dates):
+                if rng.random() > 0.3:  # ~70% fill rate to simulate realistic sparsity
+                    rows.append({
+                        "DATE": dates[day_idx],
+                        "STORE": store["STORE"],
+                        "CITY": store["CITY"],
+                        "STATE": store["STATE"],
+                        "OPEN_CLOSED_CODE": "O" if rng.random() > 0.02 else "C",
+                        **{k: product[k] for k in ["UPC", "SKU", "P_SKU", "DESCRIPTION",
+                                                    "CLASS_NBR", "CLASS_DESC",
+                                                    "DEPARTMENT_NBR", "DEPARTMENT_DESC"]},
+                        "TRANS_CT": int(trans_ct[day_idx]),
+                        "QTY_SOLD": round(float(qty[day_idx]), 0) if not np.isnan(qty[day_idx]) else None,
+                        "NET_SALES": round(float(net_sales[day_idx]), 2) if not np.isnan(qty[day_idx]) else None,
+                    })
+                    if len(rows) >= sample_size:
+                        break
+                if len(rows) >= sample_size:
+                    break
+            if len(rows) >= sample_size:
+                break
+        if len(rows) >= sample_size:
+            break
+
+    df = pd.DataFrame(rows)
+    log.info("DG dataset: %s rows, %d columns", f"{len(df):,}", len(df.columns))
     return df
 
 
 # ---------------------------------------------------------------------------
-# Main generator
+# S&F: transaction-level
 # ---------------------------------------------------------------------------
 
-def generate_synthetic_data(save: bool = True) -> pd.DataFrame:
+def generate_sf() -> pd.DataFrame:
+    """Generate synthetic S&F data with actual column names."""
+    profile = RETAILER_PROFILES["SF"]
+    dates = _daily_dates()
+    n_dates = len(dates)
+    n_stores = profile["n_stores"]
+    n_products = profile["n_products"]
+
+    log.info("Generating S&F: %d days × %d stores × %d products (transaction-level)", n_dates, n_stores, n_products)
+
+    # Product catalog
+    upc_numbers = [4900000000 + i for i in range(n_products)]
+    item_numbers = [f"ITEM-{i:05d}" for i in range(n_products)]
+
+    base = profile["base_units"]
+    sample_cap = 200_000
+    rows = []
+    txn_counter = 0
+
+    for store in range(1, n_stores + 1):
+        for day_idx in range(n_dates):
+            if rng.random() > 0.25:  # some days may have no data
+                n_txns = max(1, int(rng.poisson(8)))  # avg 8 transactions per store-day
+                for _ in range(n_txns):
+                    txn_counter += 1
+                    prod_idx = rng.integers(0, n_products)
+                    item_qty = max(1, int(rng.poisson(3)))
+                    unit_price = round(float(rng.uniform(2.0, 50.0)), 5)
+                    total_price = round(unit_price * item_qty, 5)
+
+                    rows.append({
+                        "TRANSACTIONDATE": int(dates[day_idx].strftime("%Y%m%d")),
+                        "TRANSACTIONKEY": f"TXN-{txn_counter:08d}",
+                        "POSCARDNUMBER": f"CARD-{rng.integers(100000, 999999)}",
+                        "STORENUMBER": store,
+                        "UPCNUMBER": upc_numbers[prod_idx],
+                        "ITEMNUMBER": item_numbers[prod_idx],
+                        "ITEMTOTALSALESPRICEAMOUNT": unit_price,
+                        "ITEMQUANTITY": item_qty,
+                        "TOTALNETPRICEAMOUNT": total_price,
+                        "FILENAME": f"SF_FEED_{dates[day_idx].strftime('%Y%m%d')}.csv",
+                        "FILEDATE": int(dates[day_idx].strftime("%Y%m%d")),
+                        "ROWNUMBER": txn_counter,
+                    })
+                    if len(rows) >= sample_cap:
+                        break
+            if len(rows) >= sample_cap:
+                break
+        if len(rows) >= sample_cap:
+            break
+
+    df = pd.DataFrame(rows)
+    log.info("S&F dataset: %s rows, %d columns", f"{len(df):,}", len(df.columns))
+    return df
+
+
+# ---------------------------------------------------------------------------
+# WG: store × category × day
+# ---------------------------------------------------------------------------
+
+def generate_wg() -> pd.DataFrame:
+    """Generate synthetic WG data with actual column names."""
+    profile = RETAILER_PROFILES["WG"]
+    dates = _daily_dates()
+    n_dates = len(dates)
+    n_stores = profile["n_stores"]
+    categories = WG_CATEGORIES
+
+    log.info("Generating WG: %d days × %d stores × %d categories", n_dates, n_stores, len(categories))
+
+    base = profile["base_units"]
+    rows = []
+
+    for store in range(1, n_stores + 1):
+        for cat in categories:
+            cat_base = base * rng.uniform(0.5, 2.0)
+            trend = _trend(n_dates, profile["trend_slope"])
+            season = _seasonality(dates, profile["seasonality_strength"], profile.get("peak_season"))
+            noise = _noise(n_dates, profile["noise_level"], cat_base)
+            qty = np.maximum(0, cat_base + trend + season + noise + _anomalies(n_dates, cat_base))
+            qty = _inject_missing(qty)
+            avg_price = rng.uniform(5.0, 30.0, n_dates)
+            sales = qty * avg_price
+
+            for day_idx in range(n_dates):
+                rows.append({
+                    "DATE": dates[day_idx],
+                    "STORE": store,
+                    "CATEGORY": cat,
+                    "CAT_QTY_SOLD": round(float(qty[day_idx]), 0) if not np.isnan(qty[day_idx]) else None,
+                    "CAT_NET_SALES": round(float(sales[day_idx]), 5) if not np.isnan(qty[day_idx]) else None,
+                })
+
+    df = pd.DataFrame(rows)
+    log.info("WG dataset: %s rows, %d columns", f"{len(df):,}", len(df.columns))
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Main generator — generates all 3 databases
+# ---------------------------------------------------------------------------
+
+def generate_all(save: bool = True) -> dict[str, pd.DataFrame]:
     """
-    Generate synthetic retail sales dataset.
+    Generate synthetic datasets for all 3 databases.
 
     Returns
     -------
-    pd.DataFrame
-        Long-format dataframe with one row per (date, retailer, object).
+    dict of {db_name: DataFrame}
     """
-    dates = _make_time_index()
-    log.info("Generating synthetic data: %d weeks (%s to %s)", len(dates), dates[0].date(), dates[-1].date())
+    generators = {
+        "DG": generate_dg,
+        "SF": generate_sf,
+        "WG": generate_wg,
+    }
 
-    records: list[pd.DataFrame] = []
-    for retailer, ret_profile in RETAILER_PROFILES.items():
-        for obj_id, obj_profile in OBJECT_PROFILES.items():
-            series_df = _generate_series(dates, retailer, obj_id, obj_profile, ret_profile)
-            records.append(series_df)
+    results = {}
+    for name, gen_fn in generators.items():
+        df = gen_fn()
+        results[name] = df
 
-    df = pd.concat(records, ignore_index=True)
-    df = df.sort_values([DATE_COLUMN, RETAILER_COLUMN, OBJECT_COLUMN]).reset_index(drop=True)
-    df[DATE_COLUMN] = pd.to_datetime(df[DATE_COLUMN])
+        if save:
+            csv_path = DATA_SYNTHETIC_DIR / f"synthetic_{name.lower()}.csv"
+            parquet_path = DATA_SYNTHETIC_DIR / f"synthetic_{name.lower()}.parquet"
+            df.to_csv(csv_path, index=False)
+            df.to_parquet(parquet_path, index=False)
+            log.info("Saved %s to %s and %s", name, csv_path, parquet_path)
 
-    log.info("Dataset shape: %s", df.shape)
-    log.info("Retailers: %s", df[RETAILER_COLUMN].unique().tolist())
-    log.info("Objects: %s", df[OBJECT_COLUMN].unique().tolist())
-    log.info("Date range: %s to %s", df[DATE_COLUMN].min().date(), df[DATE_COLUMN].max().date())
-    log.info("Missing %s: %.2f%%", PRIMARY_TARGET, df[PRIMARY_TARGET].isna().mean() * 100)
+    log.info("\n=== Summary ===")
+    for name, df in results.items():
+        log.info("%s: %s rows × %d cols | columns: %s", name, f"{len(df):,}", len(df.columns), list(df.columns))
 
-    if save:
-        out_path = DATA_SYNTHETIC_DIR / "synthetic_retail_sales.csv"
-        df.to_csv(out_path, index=False)
-        parquet_path = DATA_SYNTHETIC_DIR / "synthetic_retail_sales.parquet"
-        df.to_parquet(parquet_path, index=False)
-        log.info("Saved to %s", out_path)
-        log.info("Saved to %s", parquet_path)
-
-    return df
+    return results
 
 
 if __name__ == "__main__":
-    generate_synthetic_data(save=True)
+    generate_all(save=True)
