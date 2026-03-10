@@ -1,5 +1,4 @@
-"""
-Rolling-Origin Backtesting Engine.
+"""Rolling-Origin Backtesting Engine.
 
 Simulates future forecasting by training on progressively larger windows
 and predicting a fixed horizon. This is the correct time-aware validation method.
@@ -21,7 +20,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class BacktestConfig:
     date_col: str = "date"
-    target_col: str = "units_sold"
+    target_col: str = "qty_sold"
     horizon: int = 13          # forecast horizon in periods
     n_splits: int = 4          # number of rolling folds
     min_train_periods: int = 52  # minimum training length in periods
